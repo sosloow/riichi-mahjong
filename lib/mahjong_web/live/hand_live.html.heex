@@ -1,0 +1,34 @@
+<div id="hand-root">
+  <h2 class="text-xl font-bold mb-4">Your Mahjong Hand</h2>
+
+  <div class="flex space-x-2 mb-4">
+    <%= for {tile, index} <- Enum.with_index(@game.hand.tiles) do %>
+      <div
+        phx-click="discard_tile"
+        phx-value-index={index}
+      >
+        <img
+          class="w-10 h-auto cursor-pointer"
+          src={"/images/tiles/#{Mahjong.Tile.to_string(tile)}.png"}
+          alt={Mahjong.Tile.to_string(tile)}
+        />
+      </div>
+    <% end %>
+  </div>
+
+  <div class="flex space-x-2">
+    <button
+      class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded"
+      phx-click="reset"
+    >
+      Reset
+    </button>
+
+    <button
+      class="bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded"
+      phx-click="deal"
+    >
+      Deal
+    </button>
+  </div>
+</div>
