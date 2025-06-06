@@ -13,6 +13,9 @@ defmodule Mahjong.Hand.BreakdownTest do
                breakdown_hand(hand)
 
       assert best_combo.counts.triplet == 4
+      assert best_combo.shanten == -1
+      assert best_combo.tenpai?
+      assert best_combo.complete?
     end
 
     test "Detects pons of honors" do
@@ -26,12 +29,16 @@ defmodule Mahjong.Hand.BreakdownTest do
 
       pairs = best_combo.sets |> Enum.filter(&(elem(&1, 0) == :pair))
       assert pairs == [{:pair, :wind, :west}]
+      assert best_combo.counts.triplet == 4
+      assert best_combo.shanten == -1
+      assert best_combo.tenpai?
+      assert best_combo.complete?
     end
 
     test "detects combos of overlapping chis" do
       hand = Hand.from_string_list(~w[m2 m3 m4 m5 m6 m9 s6 s7 s8 p2 p3 p4 p5 p5])
 
-      assert %Hand{breakdown: %Breakdown{combos: combos}} =
+      assert %Hand{breakdown: %Breakdown{combos: combos, best_combo: best_combo, waits: waits}} =
                breakdown_hand(hand)
 
       assert Enum.find(combos, fn %{sets: sets} ->
@@ -54,6 +61,10 @@ defmodule Mahjong.Hand.BreakdownTest do
                  _ -> false
                end)
              end)
+
+      assert best_combo.shanten == 0
+      assert best_combo.tenpai?
+      assert !best_combo.complete?
     end
   end
 end

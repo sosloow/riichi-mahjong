@@ -4,7 +4,7 @@ defmodule Mahjong.Hand.Breakdown do
 
   @type t :: %__MODULE__{}
 
-  defstruct combos: [], best_combo: nil
+  defstruct combos: [], waits: nil, best_combo: nil
 
   @spec breakdown_hand(Hand.t()) :: Hand.t()
   def breakdown_hand(%Hand{tiles: tiles} = hand) do
@@ -13,64 +13,103 @@ defmodule Mahjong.Hand.Breakdown do
       |> Enum.group_by(& &1.suit)
       |> Enum.map(&combine_by_suit/1)
       |> Enum.filter(&(!Enum.empty?(&1)))
-      |> Enum.reduce([[]], fn suit_combo_variants, acc ->
+      |> Enum.reduce([%{sets: [], waits: []}], fn suit_combo_variants, acc ->
         for combo <- acc, variant <- suit_combo_variants do
-          combo ++ variant
+          merge_combos(combo, variant)
         end
       end)
       |> Enum.map(fn combo ->
-        calc_stats(combo)
+        has_pair = Enum.any?(combo.waits, fn {kind, _, _} -> kind == :pair end)
+
+        clean_waits =
+          if has_pair do
+            Enum.filter(combo.waits, fn {kind, _, _} -> kind != :pair end)
+          else
+            combo.waits
+          end
+          |> MapSet.new()
+
+        calc_stats(combo.sets)
         |> Map.merge(%{
-          sets: combo
+          sets: combo.sets,
+          waits: clean_waits
         })
       end)
 
-    best_combo =
-      Enum.max_by(combos, fn %{counts: counts} ->
-        counts.triplet * 10 + counts.pair
-      end)
+    best_combo = Enum.max_by(combos, & &1.strength)
 
     %{
       hand
       | breakdown: %__MODULE__{
           combos: combos,
-          best_combo: best_combo
+          best_combo: best_combo,
+          waits:
+            Enum.reduce(combos, MapSet.new(), fn combo, acc -> MapSet.union(combo.waits, acc) end)
         }
     }
   end
 
-  @spec combine_by_suit({atom(), list(Tile.t())}) :: list(list())
+  @spec combine_by_suit({atom(), list(Tile.t())}) :: list()
   defp combine_by_suit({suit, tiles}) do
-    tiles
-    |> Enum.map(& &1.value)
-    |> Enum.frequencies()
-    |> do_combine_by_suit(suit, [], 1)
-    |> prune_subsets()
-  end
+    freqs =
+      tiles
+      |> Enum.map(& &1.value)
+      |> Enum.frequencies()
 
-  @spec do_combine_by_suit(map(), atom(), list(), integer()) :: list(list())
-  defp do_combine_by_suit(freqs, suit, acc, min_rank) do
-    sets =
+    next_sets_fun =
       case suit do
-        s when s in [:man, :pin, :sou] -> find_suit_sets(freqs, min_rank)
-        _ -> find_honor_sets(freqs, min_rank)
+        s when s in [:man, :pin, :sou] -> &find_suit_sets/2
+        _ -> &find_honor_sets/2
       end
 
+    do_combine(freqs, [], 1, next_sets_fun)
+    |> prune_subsets()
+    |> Enum.map(fn sets ->
+      restFreqs = Enum.reduce(sets, freqs, fn set, acc -> subtract_set(acc, set) end)
+
+      %{
+        suit: suit,
+        sets: Enum.map(sets, fn {kind, rank} -> {kind, suit, rank} end),
+        restFreqs: restFreqs,
+        waits:
+          find_waits(restFreqs, sets)
+          |> Enum.map(fn {kind, rank} -> {kind, suit, rank} end)
+      }
+    end)
+  end
+
+  @spec do_combine(map(), list(), integer(), function()) :: list(list())
+  defp do_combine(freqs, acc, min_rank, next_sets_fun) do
+    sets = next_sets_fun.(freqs, min_rank)
+
     if Enum.empty?(sets) do
-      [acc |> Enum.map(fn {kind, rank} -> {kind, suit, rank} end)]
+      [acc]
     else
       for set <- sets,
           reduced = subtract_set(freqs, set),
           combo <-
-            do_combine_by_suit(
+            do_combine(
               reduced,
-              suit,
               [set | acc],
-              elem(set, 1)
+              elem(set, 1),
+              next_sets_fun
             ) do
         combo
       end
     end
+  end
+
+  defp find_waits(rest_freqs, sets) do
+    pairs = sets |> Enum.filter(fn {kind, _} -> kind == :pair end)
+    pon_waits = pairs |> Enum.map(fn {:pair, rank} -> {:pon, rank} end)
+    chi_waits = find_chi_waits(rest_freqs)
+
+    pair_waits =
+      rest_freqs
+      |> Enum.filter(fn {_rank, count} -> count == 1 end)
+      |> Enum.map(fn {rank, _count} -> {:pair, rank} end)
+
+    pon_waits ++ chi_waits ++ pair_waits
   end
 
   @spec subtract_set(map(), tuple()) :: map()
@@ -127,14 +166,12 @@ defmodule Mahjong.Hand.Breakdown do
     end)
   end
 
-  @spec find_honor_sets(map(), integer()) :: list(tuple())
-  defp find_honor_sets(freqs, min_rank) do
-    find_pons(freqs, min_rank) ++ find_pairs(freqs, min_rank)
-  end
-
-  @spec find_suit_sets(map(), integer()) :: list(tuple())
   defp find_suit_sets(freqs, min_rank) do
     find_chis(freqs, min_rank) ++ find_pons(freqs, min_rank) ++ find_pairs(freqs, min_rank)
+  end
+
+  defp find_honor_sets(freqs, min_rank) do
+    find_pons(freqs, min_rank) ++ find_pairs(freqs, min_rank)
   end
 
   @spec prune_subsets(list(list())) :: list()
@@ -160,14 +197,48 @@ defmodule Mahjong.Hand.Breakdown do
       |> Map.merge(%{pon: [], chi: [], pair: []}, fn _key, v1, v2 ->
         v1 || v2
       end)
+      |> then(fn sets ->
+        %{
+          pon: length(sets.pon),
+          chi: length(sets.chi),
+          triplet: length(sets.pon) + length(sets.chi),
+          pair: length(sets.pair)
+        }
+      end)
+
+    has_pair = counts.pair > 0
+
+    shanten =
+      min(
+        4 - counts.triplet - if(has_pair, do: 1, else: 0),
+        6 - counts.pair
+      )
 
     %{
-      counts: %{
-        pon: length(counts.pon),
-        chi: length(counts.chi),
-        triplet: length(counts.pon) + length(counts.chi),
-        pair: length(counts.pair)
-      }
+      counts: counts,
+      shanten: shanten,
+      tenpai?: shanten <= 0,
+      complete?: shanten == -1,
+      strength: counts.triplet * 10 + counts.pair
     }
+  end
+
+  defp merge_combos(
+         %{sets: sets1, waits: waits1},
+         %{sets: sets2, waits: waits2}
+       ) do
+    %{
+      sets: sets1 ++ sets2,
+      waits: waits1 ++ waits2
+    }
+  end
+
+  defp find_chi_waits(freqs) do
+    for rank <- 1..9,
+        (Map.get(freqs, rank - 2, 0) > 0 and Map.get(freqs, rank - 1, 0) > 0) or
+          (Map.get(freqs, rank - 1, 0) > 0 and Map.get(freqs, rank + 1, 0) > 0) or
+          (Map.get(freqs, rank + 1, 0) > 0 and Map.get(freqs, rank + 2, 0) > 0) do
+      {:chi, rank}
+    end
   end
 end
